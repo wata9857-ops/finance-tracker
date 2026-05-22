@@ -31,6 +31,10 @@ def get_gspread_client():
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(creds)
 
+# 以下の3行を新しく追加してください
+@st.cache_resource
+def get_worksheet(sheet_name):
+    return get_sheet().worksheet(sheet_name)
 def get_sheet():
     client = get_gspread_client()
     # "FinanceApp" という名前のスプレッドシートを使用
@@ -40,15 +44,41 @@ def get_sheet():
 # 3. データ処理ヘルパー関数 (GSheets版)
 # ==========================================
 def get_monthly_data(month):
-    sheet = get_sheet().worksheet("monthly_settings")
-    records = sheet.get_all_records()
+    sheet = get_worksheet("monthly_settings")
+    # get_all_records() ではなく get_all_values() を使い、ヘッダー破損によるデータ切り捨てを防ぐ
+    all_values = sheet.get_all_values()
     
+    correct_keys = [
+        "month", "bank_balance", "income_job", "income_allowance", "subs", 
+        "mercari_bill", "paypay_bill", "mercari_debt", "paypay_debt",
+        "job_date", "allowance_date", "subs_date", "mercari_date", "paypay_date",
+        "job_paid", "allowance_paid", "mercari_paid", "paypay_paid"
+    ]
+    
+    records = []
+    if len(all_values) > 0:
+        # 1行目が '202'（日付）から始まらない場合は、誤ったヘッダー行とみなしてスキップ
+        start_idx = 1 if not str(all_values[0][0]).startswith("202") else 0
+        for row in all_values[start_idx:]:
+            # 足りない列は0で埋める
+            padded_row = row + [0] * (len(correct_keys) - len(row))
+            parsed_row = []
+            for idx, val in enumerate(padded_row[:len(correct_keys)]):
+                if idx == 0:
+                    parsed_row.append(str(val)) # monthは文字列として保持
+                else:
+                    try:
+                        parsed_row.append(int(float(val)) if str(val).strip() != "" else 0)
+                    except:
+                        parsed_row.append(0)
+            records.append(dict(zip(correct_keys, parsed_row)))
+            
     # 今月のデータを探す
     for row in records:
         if str(row.get("month")) == month:
             return dict(row)
             
-    # ★今月のデータがない場合、前月のデータを引き継ぐ（コード①の月またぎ対策を復元）
+    # ★今月のデータがない場合、前月のデータを引き継ぐ
     data = {
         "month": month,
         "bank_balance": 0, "income_job": 0, "income_allowance": 0, "subs": 0, 
@@ -58,7 +88,6 @@ def get_monthly_data(month):
     }
     
     if records:
-        # monthカラムで降順ソートして最新（前月）のデータを取得
         sorted_records = sorted(records, key=lambda x: str(x.get("month", "")), reverse=True)
         prev_row = sorted_records[0]
         data.update({
@@ -79,31 +108,49 @@ def get_monthly_data(month):
     return data
 
 def save_monthly_data(month, data):
-    sheet = get_sheet().worksheet("monthly_settings")
-    records = sheet.get_all_records()
+    sheet = get_worksheet("monthly_settings")
+    all_values = sheet.get_all_values()
     
-    df = pd.DataFrame(records)
-    data["month"] = month # 確実に入れる
+    correct_keys = [
+        "month", "bank_balance", "income_job", "income_allowance", "subs", 
+        "mercari_bill", "paypay_bill", "mercari_debt", "paypay_debt",
+        "job_date", "allowance_date", "subs_date", "mercari_date", "paypay_date",
+        "job_paid", "allowance_paid", "mercari_paid", "paypay_paid"
+    ]
+    
+    records = []
+    if len(all_values) > 0:
+        start_idx = 1 if not str(all_values[0][0]).startswith("202") else 0
+        for row in all_values[start_idx:]:
+            padded_row = row + [0] * (len(correct_keys) - len(row))
+            parsed_row = []
+            for idx, val in enumerate(padded_row[:len(correct_keys)]):
+                if idx == 0:
+                    parsed_row.append(str(val))
+                else:
+                    try:
+                        parsed_row.append(int(float(val)) if str(val).strip() != "" else 0)
+                    except:
+                        parsed_row.append(0)
+            records.append(dict(zip(correct_keys, parsed_row)))
+            
+    df = pd.DataFrame(records, columns=correct_keys)
+    data["month"] = month
     
     if df.empty or month not in df["month"].values:
-        # 新規月の場合
         new_df = pd.DataFrame([data])
         df = pd.concat([df, new_df], ignore_index=True)
     else:
-        # 既存月の上書き
         for key, value in data.items():
             df.loc[df["month"] == month, key] = value
             
-    # NaNを0で埋める（型エラー防止）
     df = df.fillna(0)
-    
-    # シートをクリアして再書き込み
     sheet.clear()
     sheet.update(values=[df.columns.values.tolist()] + df.values.tolist())
 
 def add_daily_expense(target_date, amount, payment_method, category, memo):
     # 履歴への追加
-    sheet_daily = get_sheet().worksheet("daily_expenses")
+    sheet_daily = get_worksheet("daily_expenses")
     row_data = [target_date.strftime("%Y-%m-%d"), amount, payment_method, category, memo]
     sheet_daily.append_row(row_data)
     
@@ -111,9 +158,14 @@ def add_daily_expense(target_date, amount, payment_method, category, memo):
     m_data = get_monthly_data(current_month)
     
     if category == "特別収入":
-        # 収入の場合 (口座に入金、またはクレカの負債が減る)
+        # 収入の場合
         if payment_method == "現金/口座": m_data["bank_balance"] += amount
         elif payment_method == "メルカリクレカ": m_data["mercari_debt"] = max(0, m_data["mercari_debt"] - amount)
+        elif payment_method == "PayPayクレカ": m_data["paypay_debt"] = max(0, m_data["paypay_debt"] - amount)
+    elif category == "クレカ先払い(繰り上げ返済)":
+        # ★追加：先払いの場合、口座残高が減り、クレカ負債も同時に減る
+        m_data["bank_balance"] -= amount
+        if payment_method == "メルカリクレカ": m_data["mercari_debt"] = max(0, m_data["mercari_debt"] - amount)
         elif payment_method == "PayPayクレカ": m_data["paypay_debt"] = max(0, m_data["paypay_debt"] - amount)
     else:
         # 通常支出・特別支出の場合
@@ -124,59 +176,175 @@ def add_daily_expense(target_date, amount, payment_method, category, memo):
     save_monthly_data(current_month, m_data)
 
 def get_monthly_expenses(month):
-    sheet_daily = get_sheet().worksheet("daily_expenses")
-    records = sheet_daily.get_all_records()
+    sheet_daily = get_worksheet("daily_expenses")
+    daily_values = sheet_daily.get_all_values()
     
     expenses = {"現金/口座": 0, "メルカリクレカ": 0, "PayPayクレカ": 0}
-    for row in records:
-        if str(row.get("date", "")).startswith(month):
-            # 特別収入は支出合計から除外
-            if row.get("category") != "特別収入":
-                method = row.get("payment_method")
+    if len(daily_values) == 0:
+        return expenses
+        
+    start_idx = 1 if not str(daily_values[0][0]).startswith("202") else 0
+    
+    for row in daily_values[start_idx:]:
+        padded = row + [""] * (5 - len(row))
+        if str(padded[0]).startswith(month):
+            if padded[3] != "特別収入":
+                method = padded[2]
                 if method in expenses:
-                    expenses[method] += int(row.get("amount", 0))
+                    try:
+                        expenses[method] += int(float(padded[1]) if str(padded[1]).strip() else 0)
+                    except:
+                        pass
     return expenses
 
-def toggle_status(column, current_val):
+def toggle_status(column, current_val, amount=0, type="income", debt_col=None):
     m_data = get_monthly_data(current_month)
-    m_data[column] = 1 if current_val == 0 else 0
+    
+    # 0 -> 1 (未完了から完了へ：チェックを入れた時)
+    if current_val == 0:
+        m_data[column] = 1
+        if type == "income":
+            m_data["bank_balance"] += amount # 収入なら残高を増やす
+        elif type == "expense":
+            m_data["bank_balance"] -= amount # 支出なら残高を減らす
+            if debt_col:
+                m_data[debt_col] = max(0, m_data[debt_col] - amount) # クレカなら未払い総額も減らす
+                
+    # 1 -> 0 (完了から未完了へ：チェックを外した時（間違えた時の取り消し機能）)
+    else:
+        m_data[column] = 0
+        if type == "income":
+            m_data["bank_balance"] -= amount # 収入の取り消し
+        elif type == "expense":
+            m_data["bank_balance"] += amount # 支出の取り消し
+            if debt_col:
+                m_data[debt_col] += amount # 減らした未払い総額を元に戻す
+                
     save_monthly_data(current_month, m_data)
 
 # ==========================================
-# 4. キャッシュフロー予測ロジック (コード①完全復元)
+# 4. キャッシュフロー予測ロジック
 # ==========================================
 m_data = get_monthly_data(current_month)
 spent_this_month = get_monthly_expenses(current_month)
 
-# 1日〜月末までの「未完了」イベントを辞書にまとめる
-events = {day: 0 for day in range(1, 32)}
+# 全月データを取得 (5ヶ月先の予測 & 後続のUI表示用)
+sheet_m = get_worksheet("monthly_settings")
+all_values_m = sheet_m.get_all_values()
+correct_keys = [
+    "month", "bank_balance", "income_job", "income_allowance", "subs", 
+    "mercari_bill", "paypay_bill", "mercari_debt", "paypay_debt",
+    "job_date", "allowance_date", "subs_date", "mercari_date", "paypay_date",
+    "job_paid", "allowance_paid", "mercari_paid", "paypay_paid"
+]
+all_m_records_list = []
+if len(all_values_m) > 0:
+    start_idx = 1 if not str(all_values_m[0][0]).startswith("202") else 0
+    for row in all_values_m[start_idx:]:
+        padded_row = row + [0] * (len(correct_keys) - len(row))
+        all_m_records_list.append(dict(zip(correct_keys, padded_row)))
 
-# ★チェックボックスがオフ（未完了）のものだけを予測に含める
-if m_data['job_paid'] == 0: events[m_data['job_date']] += m_data['income_job']
-if m_data['allowance_paid'] == 0: events[m_data['allowance_date']] += m_data['income_allowance']
-if m_data['mercari_paid'] == 0: events[m_data['mercari_date']] -= m_data['mercari_bill']
-if m_data['paypay_paid'] == 0: events[m_data['paypay_date']] -= m_data['paypay_bill']
-# ※サブスク代(subs)はクレカ請求に含まれる前提のため、予測からは引かない
+all_m_records = {str(r.get("month")): r for r in all_m_records_list if str(r.get("month"))}
 
-future_income = sum(v for day, v in events.items() if day >= today.day and v > 0)
-future_expense = sum(abs(v) for day, v in events.items() if day >= today.day and v < 0)
+# 約5ヶ月(150日)先までのイベントを構築
+long_term_events = {}
+for offset in range(6): 
+    y = today.year + (today.month + offset - 1) // 12
+    m = (today.month + offset - 1) % 12 + 1
+    m_str = f"{y}-{m:02d}"
+    
+    # 該当月のデータがない場合は今月のデータをベースに仮作成
+    m_dict = all_m_records.get(m_str, m_data.copy())
+    
+    # 未来の月はすべて未払い(0)としてシミュレーションする
+    is_current = (offset == 0)
+    job_paid = int(float(m_dict.get('job_paid', 0))) if is_current else 0
+    allowance_paid = int(float(m_dict.get('allowance_paid', 0))) if is_current else 0
+    mercari_paid = int(float(m_dict.get('mercari_paid', 0))) if is_current else 0
+    paypay_paid = int(float(m_dict.get('paypay_paid', 0))) if is_current else 0
 
-# 今月これから自由に使える現金 = 現在の口座残高 + これから入る収入 - これから払うクレカ代
-available_total = m_data['bank_balance'] + future_income - future_expense
+    def add_event(date_val, name, amount):
+        try:
+            d = int(float(date_val))
+            max_d = calendar.monthrange(y, m)[1]
+            safe_d = max(1, min(d, max_d))
+            event_date = datetime(y, m, safe_d).date()
+            if event_date >= today:
+                if event_date not in long_term_events: long_term_events[event_date] = []
+                long_term_events[event_date].append({"name": name, "amount": amount})
+        except: pass
+
+    if job_paid == 0: add_event(m_dict.get('job_date', 25), "バイト代", int(float(m_dict.get('income_job', 0))))
+    if allowance_paid == 0: add_event(m_dict.get('allowance_date', 1), "小遣い", int(float(m_dict.get('income_allowance', 0))))
+    if mercari_paid == 0: add_event(m_dict.get('mercari_date', 27), "メルカード引落", -int(float(m_dict.get('mercari_bill', 0))))
+    if paypay_paid == 0: add_event(m_dict.get('paypay_date', 27), "PayPay引落", -int(float(m_dict.get('paypay_bill', 0))))
+
+# 150日先までのシミュレーション実行
+sim_balance = m_data['bank_balance']
+long_term_chart_data = []
+short_term_chart_data = [] # 今月用のグラフデータ
+shortfall_warnings = []
+simulation_log = [] 
+bankruptcy_date = None
+min_future_balance = sim_balance
+
+end_date = today + timedelta(days=150)
+curr_date = today
+
+future_income_1m = 0
+future_expense_1m = 0
+
+while curr_date <= end_date:
+    daily_events = long_term_events.get(curr_date, [])
+    if daily_events:
+        daily_in = sum(ev["amount"] for ev in daily_events if ev["amount"] > 0)
+        daily_out = sum(abs(ev["amount"]) for ev in daily_events if ev["amount"] < 0)
+        sim_balance += (daily_in - daily_out)
+        
+        # 今月分のログはUI互換のために残す
+        if curr_date.month == today.month:
+            future_income_1m += daily_in
+            future_expense_1m += daily_out
+            simulation_log.append({
+                "日付": f"{curr_date.month}/{curr_date.day}",
+                "イベント": ", ".join([ev["name"] for ev in daily_events]),
+                "入出金": daily_in - daily_out,
+                "予想口座残高": sim_balance
+            })
+    
+    # グラフ用データの記録
+    long_term_chart_data.append({"日付": curr_date.strftime("%Y-%m-%d"), "残高": sim_balance})
+    if curr_date.month == today.month:
+        short_term_chart_data.append({"日付": f"{curr_date.month}/{curr_date.day}", "残高": sim_balance})
+    
+    # 最も残高が少なくなる底の金額（真の余力）を更新
+    if sim_balance < min_future_balance:
+        min_future_balance = sim_balance
+        
+    # 初めてマイナスになった日（破産日）を記録
+    if sim_balance < 0 and bankruptcy_date is None:
+        bankruptcy_date = curr_date
+        
+    # 今月の一時的なショート警告
+    if sim_balance < 0 and curr_date.month == today.month and not any(w['day'] == curr_date.day for w in shortfall_warnings):
+        shortfall_warnings.append({"day": curr_date.day, "shortfall": abs(sim_balance)})
+
+    curr_date += timedelta(days=1)
+
+# ==========================================
+# 真の「使える金額」の再検証
+# ==========================================
+# ① 表面上の今月の余力
+available_total_1_month = m_data['bank_balance'] + future_income_1m - future_expense_1m
+
+# ② 5ヶ月先までの一番厳しい残高（これが真の余力）
+true_available_total = max(0, min_future_balance)
+
+# 将来の赤字を避けるため、1ヶ月の余力と長期の余力のうち「厳しい方」を採用
+available_total = min(available_total_1_month, true_available_total)
 daily_allowance = available_total // remaining_days if available_total > 0 else 0
 
-# 日々の口座残高シミュレーション（資金ショート判定用）
-sim_balance = m_data['bank_balance']
-shortfall_warnings = []
-
-for d in range(today.day, days_in_month + 1):
-    sim_balance += events[d] # その日の収入・支出を反映
-    if sim_balance < 0:
-        shortfall_warnings.append({"day": d, "shortfall": abs(sim_balance)})
-    # 毎日使える額を消費すると仮定して翌日へ
-    sim_balance -= daily_allowance
-
-current_funds = m_data['bank_balance'] + future_income
+current_funds = m_data['bank_balance'] + future_income_1m
 net_worth = current_funds - m_data['mercari_debt'] - m_data['paypay_debt']
 
 # ==========================================
@@ -194,7 +362,8 @@ with st.container():
         payment_method = col2.selectbox("支払方法", ["現金/口座", "メルカリクレカ", "PayPayクレカ"])
         
         col_cat, col_amt = st.columns(2)
-        category = col_cat.selectbox("カテゴリ", ["通常支出", "特別支出", "特別収入"])
+        # ★カテゴリに「クレカ先払い(繰り上げ返済)」を追加
+        category = col_cat.selectbox("カテゴリ", ["通常支出", "特別支出", "特別収入", "クレカ先払い(繰り上げ返済)"])
         expense_amount = col_amt.number_input("金額(円)", min_value=0, step=100)
         
         col_memo, col_submit = st.columns([3, 1])
@@ -203,8 +372,13 @@ with st.container():
         
         if submit and expense_amount > 0:
             add_daily_expense(expense_date, expense_amount, payment_method, category, memo)
-            # 通知メッセージもカテゴリに合わせてわかりやすく
-            action_text = "収入として残高に加算" if category == "特別収入" else "支出として記録"
+            # ★通知メッセージも操作に合わせてわかりやすく変更
+            if category == "特別収入":
+                action_text = "収入として残高に加算"
+            elif category == "クレカ先払い(繰り上げ返済)":
+                action_text = "先払いとして処理（口座と負債からマイナス）"
+            else:
+                action_text = "支出として記録"
             st.success(f"¥{expense_amount:,} を {payment_method} ({category}) で{action_text}しました！")
             st.rerun()
 
@@ -219,108 +393,300 @@ c2.metric("月末まで自由に使える現金", f"¥{available_total:,}")
 st.caption(f"今月の利用額計: 現金(¥{spent_this_month['現金/口座']:,}) / メルカリ(¥{spent_this_month['メルカリクレカ']:,}) / PayPay(¥{spent_this_month['PayPayクレカ']:,})")
 
 # --- ③ 支払い判定とアラート ---
-st.markdown("### 🚨 支払い判定")
-if available_total < 0:
-    shortfall = abs(available_total)
-    st.error(f"⚠️ **最終的な資金不足**\n\n今月末までにトータルで **¥{shortfall:,}** 不足します。")
-    st.warning(f"💡 **対策**: 支払日までに口座へ入金するか、今月のメルカリまたはPayPay請求のうち、**最低 ¥{shortfall:,} 以上を分割払い(リボ)に変更**してください。")
+if bankruptcy_date:
+    if bankruptcy_date.month == today.month:
+        st.error(f"🚨 **【破産警告】** このままいくと **{bankruptcy_date.month}/{bankruptcy_date.day}** に資金がショートし、破産します！至急対応してください。")
+    else:
+        st.error(f"🚨 **【長期破産警告】** このままの生活を続けると、数ヶ月先の **{bankruptcy_date.strftime('%Y年%m月%d日')}** に資金が底をつき破産します！")
+        
+if available_total_1_month < 0:
+    shortfall = abs(available_total_1_month)
+    st.error(f"⚠️ **今月末時点での最終的な資金不足**\n\n今月末までにトータルで **¥{shortfall:,}** 不足します。\n\n💡 **対策**: 支払日までに口座へ入金するか、今月の請求を分割払いに変更してください。")
 elif shortfall_warnings:
-    first_shortfall = shortfall_warnings[0]
-    st.error(f"⚠️ **一時的な資金ショート予測！**\n\nトータルでは足りますが、**{first_shortfall['day']}日の支払日時点** で口座残高が **¥{first_shortfall['shortfall']:,}** マイナスになります。給料日とのタイミングのズレにご注意ください。")
+    st.warning("⚠️ **一時的な資金ショート予測！**\n\n月末トータルでは足りますが、給料日などの前に引き落としが来て残高がマイナスになります。")
+    for w in shortfall_warnings:
+        st.warning(f"👉 **{today.month}/{w['day']}** の時点で口座残高が **¥{w['shortfall']:,}** 足りなくなります！事前に口座へ入金してください。")
 elif available_total < 5000:
-    st.warning(f"⚠️ 支払いは間に合いますが、今月の残り資金が **¥{available_total:,}** とギリギリです。")
+    st.warning(f"⚠️ 支払いは間に合いますが、本当に使える残り資金が **¥{available_total:,}** とギリギリです。")
 else:
-    st.success("💳 クレカの引き落としはスケジュール通り問題なく行えます。")
+    st.success("💳 固定費・クレカの引き落としはスケジュール通り問題なく行える見込みです。")
+
+# 再検証メッセージの表示
+if true_available_total < available_total_1_month:
+    st.warning(f"🔍 **「今月使える金額」の再検証結果**\n\n今月だけで見ると ¥{available_total_1_month:,} 余るように見えますが、数ヶ月先の請求を考慮すると赤字になるため、**本当に今月使っていい上限額は ¥{available_total:,} に下方修正** されました。")
 
 st.info(f"ℹ️ **サブスク代 (¥{m_data['subs']:,})** はクレカの請求額に含まれている前提のため、二重引き落としを防ぐ目的で口座残高予測からは引いていません。")
 
+# 残高推移グラフを追加（短期・長期の2段構成）
+st.markdown("#### 📊 短期予測グラフ (今月末まで)")
+if short_term_chart_data:
+    df_chart_short = pd.DataFrame(short_term_chart_data).set_index("日付")
+    chart_color_short = "#ff4b4b" if shortfall_warnings or available_total_1_month < 0 else "#00d46a"
+    st.line_chart(df_chart_short, y="残高", color=chart_color_short)
+
+st.markdown("#### 📈 長期予測グラフ (5ヶ月先まで)")
+if long_term_chart_data:
+    df_chart_long = pd.DataFrame(long_term_chart_data).set_index("日付")
+    # 長期グラフは色を変えて視認性を高める（破産なら赤、安全なら青系）
+    chart_color_long = "#ff4b4b" if bankruptcy_date else "#3282b8"
+    st.line_chart(df_chart_long, y="残高", color=chart_color_long)
+
 st.divider()
+
+# カラム横並びを廃止し、タブで横幅を広く確保して見やすさを向上
+tab1, tab2 = st.tabs(["🔮 今月の未完了・支出シミュレーション", "📜 過去の支出・収入ログ"])
+
+with tab1:
+    if simulation_log:
+        df_sim = pd.DataFrame(simulation_log)
+        # column_configを使用してリッチなテーブル表示
+        st.dataframe(
+            df_sim,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "日付": st.column_config.TextColumn("日付", width="small"),
+                "イベント": st.column_config.TextColumn("イベント", width="medium"),
+                "入出金": st.column_config.NumberColumn("入出金", format="¥%d"),
+                "予想口座残高": st.column_config.NumberColumn("予想口座残高", format="¥%d")
+            }
+        )
+    else:
+        st.info("今月の未完了の収入・支出予定はありません。")
+
+with tab2:
+    sheet_daily = get_worksheet("daily_expenses")
+    daily_values = sheet_daily.get_all_values()
+    
+    all_expenses = []
+    if len(daily_values) > 0:
+        daily_keys = ['date', 'amount', 'payment_method', 'category', 'memo']
+        start_idx = 1 if not str(daily_values[0][0]).startswith("202") else 0
+        for row in daily_values[start_idx:]:
+            padded = row + [""] * (5 - len(row))
+            all_expenses.append(dict(zip(daily_keys, padded)))
+            
+    if all_expenses:
+        df_expenses = pd.DataFrame(all_expenses)
+        
+        # 文字列結合ではなく、数値として保持してPandas Styleで色付けする
+        def clean_amount(val):
+            try:
+                return int(float(val))
+            except:
+                return 0
+                
+        df_expenses['amount_num'] = df_expenses['amount'].apply(clean_amount)
+        df_expenses['実金額'] = df_expenses.apply(lambda r: r['amount_num'] if r['category'] == '特別収入' else -r['amount_num'], axis=1)
+        
+        # カテゴリごとにアイコンを付与して視認性アップ
+        def get_cat_icon(cat):
+            icons = {"通常支出": "🛒", "特別支出": "💸", "特別収入": "💰", "クレカ先払い(繰り上げ返済)": "💳"}
+            return f"{icons.get(cat, '📌')} {cat}"
+            
+        df_expenses['カテゴリ'] = df_expenses['category'].apply(get_cat_icon)
+        
+        df_display = df_expenses[['date', 'カテゴリ', 'payment_method', '実金額', 'memo']].rename(
+            columns={'date': '日付', 'payment_method': '支払方法', 'memo': 'メモ'}
+        )
+        df_display = df_display.sort_values(by='日付', ascending=False).reset_index(drop=True)
+        
+        # マイナスは赤、プラスは緑にスタイル適用
+        def color_amounts(val):
+            if isinstance(val, (int, float)):
+                color = '#ff4b4b' if val < 0 else '#00d46a'
+                return f'color: {color}; font-weight: bold;'
+            return ''
+            
+        styled_df = df_display.style.map(color_amounts, subset=['実金額']).format({"実金額": "¥{:,.0f}"})
+        
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+    else:
+        st.write("履歴がありません。")
 
 # --- ④ ステータス管理 ---
 st.markdown("### ✅ 収入・支払いの完了チェック")
-st.caption("実際の口座で引き落としや振込が完了したらチェックを入れてください。予測から除外され計算が正確になります。")
+st.caption("実際の口座で引き落としや振込が完了したらチェックを入れてください。自動で口座残高や未払い総額が計算・保存されます。（間違えて押しても、チェックを外せば元に戻ります！）")
 
 col_chk1, col_chk2 = st.columns(2)
-if col_chk1.checkbox(f"バイト代受取 (¥{m_data['income_job']:,})", value=bool(m_data['job_paid'])):
-    if m_data['job_paid'] == 0: toggle_status('job_paid', 0); st.rerun()
-else:
-    if m_data['job_paid'] == 1: toggle_status('job_paid', 1); st.rerun()
 
-if col_chk1.checkbox(f"小遣い受取 (¥{m_data['income_allowance']:,})", value=bool(m_data['allowance_paid'])):
-    if m_data['allowance_paid'] == 0: toggle_status('allowance_paid', 0); st.rerun()
+# バイト代
+is_job_paid = bool(m_data['job_paid'])
+if col_chk1.checkbox(f"バイト代受取 (¥{m_data['income_job']:,})", value=is_job_paid):
+    if not is_job_paid: 
+        toggle_status('job_paid', 0, amount=m_data['income_job'], type="income")
+        st.rerun()
 else:
-    if m_data['allowance_paid'] == 1: toggle_status('allowance_paid', 1); st.rerun()
+    if is_job_paid: 
+        toggle_status('job_paid', 1, amount=m_data['income_job'], type="income")
+        st.rerun()
 
-if col_chk2.checkbox(f"メルカリ支払済 (¥{m_data['mercari_bill']:,})", value=bool(m_data['mercari_paid'])):
-    if m_data['mercari_paid'] == 0: toggle_status('mercari_paid', 0); st.rerun()
+# 小遣い
+is_allowance_paid = bool(m_data['allowance_paid'])
+if col_chk1.checkbox(f"小遣い受取 (¥{m_data['income_allowance']:,})", value=is_allowance_paid):
+    if not is_allowance_paid: 
+        toggle_status('allowance_paid', 0, amount=m_data['income_allowance'], type="income")
+        st.rerun()
 else:
-    if m_data['mercari_paid'] == 1: toggle_status('mercari_paid', 1); st.rerun()
+    if is_allowance_paid: 
+        toggle_status('allowance_paid', 1, amount=m_data['income_allowance'], type="income")
+        st.rerun()
 
-if col_chk2.checkbox(f"PayPay支払済 (¥{m_data['paypay_bill']:,})", value=bool(m_data['paypay_paid'])):
-    if m_data['paypay_paid'] == 0: toggle_status('paypay_paid', 0); st.rerun()
+# メルカード
+is_mercari_paid = bool(m_data['mercari_paid'])
+if col_chk2.checkbox(f"メルカード支払済 (¥{m_data['mercari_bill']:,})", value=is_mercari_paid):
+    if not is_mercari_paid: 
+        toggle_status('mercari_paid', 0, amount=m_data['mercari_bill'], type="expense", debt_col='mercari_debt')
+        st.rerun()
 else:
-    if m_data['paypay_paid'] == 1: toggle_status('paypay_paid', 1); st.rerun()
+    if is_mercari_paid: 
+        toggle_status('mercari_paid', 1, amount=m_data['mercari_bill'], type="expense", debt_col='mercari_debt')
+        st.rerun()
+
+# PayPayカード
+is_paypay_paid = bool(m_data['paypay_paid'])
+if col_chk2.checkbox(f"PayPayカード支払済 (¥{m_data['paypay_bill']:,})", value=is_paypay_paid):
+    if not is_paypay_paid: 
+        toggle_status('paypay_paid', 0, amount=m_data['paypay_bill'], type="expense", debt_col='paypay_debt')
+        st.rerun()
+else:
+    if is_paypay_paid: 
+        toggle_status('paypay_paid', 1, amount=m_data['paypay_bill'], type="expense", debt_col='paypay_debt')
+        st.rerun()
 
 st.divider()
 
-# --- ⑤ 財政予想・残高確認 ---
-st.markdown("### 🔮 財政予想 & クレカ総利用残高")
-c3, c4 = st.columns(2)
-c3.metric("メルカリ総利用残高", f"¥{m_data['mercari_debt']:,}", f"今月請求: ¥{m_data['mercari_bill']:,}", delta_color="inverse")
-c4.metric("PayPay総利用残高", f"¥{m_data['paypay_debt']:,}", f"今月請求: ¥{m_data['paypay_bill']:,}", delta_color="inverse")
+# --- ⑤ 財政予想・クレカ利用枠確認 ---
+st.markdown("### 🔮 クレカ利用状況 & 財政予想")
+st.caption("※メルペイやPayPayの「電子マネー残高（チャージ分）」は、現金と同じように『銀行口座』の残高に含めて管理するとわかりやすいです！")
 
-if net_worth >= 0:
-    st.success(f"💡 **現在の実質純資産: ¥{net_worth:,}**\n\n(すべてのクレカ残高を一括返済しても手元にお金が残ります)")
+# ★追加：来月以降に登録されている分割払い等の請求額をスキャンして合計する
+sheet_m = get_worksheet("monthly_settings")
+all_values_m = sheet_m.get_all_values()
+
+correct_keys = [
+    "month", "bank_balance", "income_job", "income_allowance", "subs", 
+    "mercari_bill", "paypay_bill", "mercari_debt", "paypay_debt",
+    "job_date", "allowance_date", "subs_date", "mercari_date", "paypay_date",
+    "job_paid", "allowance_paid", "mercari_paid", "paypay_paid"
+]
+
+all_m_records = []
+if len(all_values_m) > 0:
+    start_idx = 1 if not str(all_values_m[0][0]).startswith("202") else 0
+    for row in all_values_m[start_idx:]:
+        padded_row = row + [0] * (len(correct_keys) - len(row))
+        all_m_records.append(dict(zip(correct_keys, padded_row)))
+
+future_mercari_bills = 0
+future_paypay_bills = 0
+
+for row in all_m_records:
+    row_month = str(row.get("month", "")).strip()
+    if not row_month:
+        continue # 空のデータはスキップ
+        
+    # 【修正点1】今月以降のデータで、かつ未払いのものを足し合わせる (>= に変更)
+    if row_month >= current_month:
+        try:
+            # 【修正点2】CSVから取得した値は文字列のため、必ず数値に変換してから「0(未払い)かどうか」を判定する
+            is_mercari_paid = int(float(row.get("mercari_paid", 0) or 0))
+            is_paypay_paid = int(float(row.get("paypay_paid", 0) or 0))
+            
+            if is_mercari_paid == 0:
+                future_mercari_bills += int(float(row.get("mercari_bill", 0) or 0))
+            if is_paypay_paid == 0:
+                future_paypay_bills += int(float(row.get("paypay_bill", 0) or 0))
+        except ValueError:
+            pass # 数値に変換できない不正なデータが入っていた場合はスキップ
+
+c3, c4 = st.columns(2)
+
+# 現在の未払い総額 ＋ 未来の分割払い請求額 ＝ 本当の利用残高
+real_mercari_debt = m_data['mercari_debt'] + future_mercari_bills
+real_paypay_debt = m_data['paypay_debt'] + future_paypay_bills
+
+mercari_avail = 100000 - real_mercari_debt
+paypay_avail = 30000 - real_paypay_debt
+
+c3.metric("メルカード 利用可能枠 (上限10万)", f"¥{mercari_avail:,}", f"未払い総額: -¥{real_mercari_debt:,}", delta_color="normal")
+c4.metric("PayPayカード 利用可能枠 (上限3万)", f"¥{paypay_avail:,}", f"未払い総額: -¥{real_paypay_debt:,}", delta_color="normal")
+
+# 純資産も、未来の分割払いを含めた「本当の負債」で計算
+real_net_worth = current_funds - real_mercari_debt - real_paypay_debt
+
+if real_net_worth >= 0:
+    st.success(f"💡 **現在の実質純資産: ¥{real_net_worth:,}**\n\n(すべてのクレカ未払い分を一括返済しても手元にお金が残ります)")
 else:
-    st.error(f"📉 **現在の実質純資産: ¥{net_worth:,}**\n\n(全クレカ残高を引くとマイナスです。将来の収入で返す必要があります)")
+    st.error(f"📉 **現在の実質純資産: ¥{real_net_worth:,}**\n\n(全クレカ未払い分を引くとマイナスです。将来の収入で返す必要があります)")
 
 st.divider()
 
 # --- ⑥ 月次データ設定 ---
-with st.expander("⚙️ 基本データの設定・修正 (月1回・ズレた時)"):
-    with st.form("monthly_data_form"):
-        st.caption("※日々の記録を入力すると自動で残高が変わるため、ここは実際の口座額とズレが生じた時の修正や、月初の予定入力に使用してください。")
+with st.expander("⚙️ 基本データの設定・修正 (月1回・ズレた時・未来の請求予定)"):
+    
+    # --- 追加機能：編集する月を選ぶ ---
+    month_options = []
+    for i in range(12): # 今月から12ヶ月先まで選択可能にする
+        m = today.month + i
+        y = today.year + (m - 1) // 12
+        m = (m - 1) % 12 + 1
+        month_options.append(f"{y}-{m:02d}")
         
-        st.markdown("**💰 口座残高・収入予定**")
-        new_balance = st.number_input("銀行口座 現在の実際の残高", value=m_data['bank_balance'], step=1000)
+    edit_target_month = st.selectbox("📝 予定を入力・編集する月を選択", month_options)
+    edit_m_data = get_monthly_data(edit_target_month)
+    
+    # 選択された月の「日付」オブジェクトを安全に作る関数（カレンダー表示用）
+    def get_date_for_month(day_int):
+        y, m = map(int, edit_target_month.split("-"))
+        max_day = calendar.monthrange(y, m)[1]
+        safe_d = max(1, min(int(day_int), max_day)) # 存在しない日（2月30日など）を防止
+        return datetime(y, m, safe_d).date()
+        
+    with st.form("monthly_data_form"):
+        st.caption(f"※現在【 {edit_target_month} 】のデータを編集しています。カレンダーから日付を選んでください。")
+        
+        st.markdown("**💰 口座・電子マネー残高 & 収入予定**")
+        new_balance = st.number_input("銀行口座＋チャージ済電子マネーの合計残高", value=edit_m_data['bank_balance'], step=1000)
         
         col_in1, col_in2 = st.columns([1, 2])
-        new_job_date = col_in1.number_input("バイト代(日)", 1, 31, m_data['job_date'])
-        new_job = col_in2.number_input("バイト代(金額)", value=m_data['income_job'], step=1000)
+        new_job_date_obj = col_in1.date_input("バイト代(日付)", value=get_date_for_month(edit_m_data['job_date']))
+        new_job = col_in2.number_input("バイト代(金額)", value=edit_m_data['income_job'], step=1000)
         
         col_in3, col_in4 = st.columns([1, 2])
-        new_allowance_date = col_in3.number_input("小遣い(日)", 1, 31, m_data['allowance_date'])
-        new_allowance = col_in4.number_input("小遣い(金額)", value=m_data['income_allowance'], step=1000)
+        new_allowance_date_obj = col_in3.date_input("小遣い(日付)", value=get_date_for_month(edit_m_data['allowance_date']))
+        new_allowance = col_in4.number_input("小遣い(金額)", value=edit_m_data['income_allowance'], step=1000)
         
         st.markdown("**💳 固定費・今月の請求予定**")
         col_s1, col_s2 = st.columns([1, 2])
-        new_subs_date = col_s1.number_input("サブスク(日)", 1, 31, m_data['subs_date'])
-        new_subs = col_s2.number_input("サブスク(合計額・把握用)", value=m_data['subs'], step=100)
+        new_subs_date_obj = col_s1.date_input("サブスク(日付)", value=get_date_for_month(edit_m_data['subs_date']))
+        new_subs = col_s2.number_input("サブスク(合計額・把握用)", value=edit_m_data['subs'], step=100)
         
         col_m1, col_m2 = st.columns([1, 2])
-        new_mercari_date = col_m1.number_input("メルカリ(日)", 1, 31, m_data['mercari_date'])
-        new_mercari_bill = col_m2.number_input("メルカリ(請求額)", value=m_data['mercari_bill'], step=1000)
+        new_mercari_date_obj = col_m1.date_input("メルカード(支払日)", value=get_date_for_month(edit_m_data['mercari_date']))
+        new_mercari_bill = col_m2.number_input("メルカード(今月の請求額)", value=edit_m_data['mercari_bill'], step=1000)
         
         col_p1, col_p2 = st.columns([1, 2])
-        new_paypay_date = col_p1.number_input("PayPay(日)", 1, 31, m_data['paypay_date'])
-        new_paypay_bill = col_p2.number_input("PayPay(請求額)", value=m_data['paypay_bill'], step=1000)
+        new_paypay_date_obj = col_p1.date_input("PayPayカード(支払日)", value=get_date_for_month(edit_m_data['paypay_date']))
+        new_paypay_bill = col_p2.number_input("PayPayカード(今月の請求額)", value=edit_m_data['paypay_bill'], step=1000)
 
-        st.markdown("**📉 クレカ総利用残高 (未払い負債の合計)**")
+        st.markdown("**📉 クレカの未払い利用総額 (まだ口座から引き落とされていない利用分の合計)**")
+        st.caption("※すでに支払いが確定している「今月の請求額」と、分割などで「来月以降に支払う額」の合計です。")
         col_debt1, col_debt2 = st.columns(2)
-        new_mercari_debt = col_debt1.number_input("メルカリ 総残高", value=m_data['mercari_debt'], step=1000)
-        new_paypay_debt = col_debt2.number_input("PayPay 総残高", value=m_data['paypay_debt'], step=1000)
+        new_mercari_debt = col_debt1.number_input("メルカード 未払い総額", value=edit_m_data['mercari_debt'], step=1000)
+        new_paypay_debt = col_debt2.number_input("PayPayカード 未払い総額", value=edit_m_data['paypay_debt'], step=1000)
         
         if st.form_submit_button("保存して更新"):
-            m_data.update({
+            edit_m_data.update({
                 "bank_balance": new_balance,
-                "income_job": new_job, "job_date": new_job_date,
-                "income_allowance": new_allowance, "allowance_date": new_allowance_date,
-                "subs": new_subs, "subs_date": new_subs_date,
-                "mercari_bill": new_mercari_bill, "mercari_date": new_mercari_date,
-                "paypay_bill": new_paypay_bill, "paypay_date": new_paypay_date,
+                "income_job": new_job, "job_date": new_job_date_obj.day, # カレンダーから「日」だけを抽出して保存
+                "income_allowance": new_allowance, "allowance_date": new_allowance_date_obj.day,
+                "subs": new_subs, "subs_date": new_subs_date_obj.day,
+                "mercari_bill": new_mercari_bill, "mercari_date": new_mercari_date_obj.day,
+                "paypay_bill": new_paypay_bill, "paypay_date": new_paypay_date_obj.day,
                 "mercari_debt": new_mercari_debt,
                 "paypay_debt": new_paypay_debt
             })
-            save_monthly_data(current_month, m_data)
-            st.success("更新しました！")
+            save_monthly_data(edit_target_month, edit_m_data)
+            st.success(f"✅ {edit_target_month} のデータを更新しました！")
             st.rerun()
