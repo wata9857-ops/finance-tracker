@@ -396,20 +396,101 @@ c2.metric("月末まで自由に使える現金", f"¥{available_total:,}")
 
 st.caption(f"今月の利用額計: 現金(¥{spent_this_month['現金/口座']:,}) / メルカリ(¥{spent_this_month['メルカリクレカ']:,}) / PayPay(¥{spent_this_month['PayPayクレカ']:,})")
 
-# --- ③ 支払い判定とアラート ---
-if bankruptcy_date:
-    if bankruptcy_date.month == today.month:
-        st.error(f"🚨 **【破産警告】** このままいくと **{bankruptcy_date.month}/{bankruptcy_date.day}** に資金がショートし、破産します！至急対応してください。")
+# --- ③ 支払い判定とアラート (高度な数学的救済ロジック搭載) ---
+# 150日間の予測データから、一番最初に残高がマイナスになる日（破綻日）と不足額を取得
+first_fail_record = next((row for row in long_term_chart_data if row["残高"] < 0), None)
+
+if first_fail_record:
+    fail_date_str = first_fail_record["日付"]
+    fail_amount = abs(first_fail_record["残高"])
+    
+    if fail_date_str.startswith(f"{today.year}-{today.month:02d}"):
+        st.error(f"🚨 **【資金ショート確定】** 今月の **{fail_date_str}** の時点で **¥{fail_amount:,}** が不足し、口座残高がパンクします。")
     else:
-        st.error(f"🚨 **【長期破産警告】** このままの生活を続けると、数ヶ月先の **{bankruptcy_date.strftime('%Y年%m月%d日')}** に資金が底をつき破産します！")
+        st.error(f"🚨 **【将来の資金ショート確定】** このままいくと **{fail_date_str}** に資金が底をつき、**¥{fail_amount:,}** の赤字になります。")
+
+    with st.expander("🆘 数学的根拠に基づく高度な救済シミュレーション", expanded=True):
+        st.markdown("将来のすべての収入・支出予測データ（150日分）の配列を再計算し、破綻を回避するための具体的な数値を導き出しました。")
         
-if available_total_1_month < 0:
-    shortfall = abs(available_total_1_month)
-    st.error(f"⚠️ **今月末時点での最終的な資金不足**\n\n今月末までにトータルで **¥{shortfall:,}** 不足します。\n\n💡 **対策**: 支払日までに口座へ入金するか、今月の請求を分割払いに変更してください。")
+        # --- 解決策A: 日々の支出削減（自力での解決） ---
+        st.markdown(f"#### 💡 プランA: 破綻日までの支出ペースを下げる")
+        fail_date_obj = datetime.strptime(fail_date_str, "%Y-%m-%d").date()
+        days_to_fail = (fail_date_obj - today).days
+        
+        if days_to_fail > 0:
+            daily_cut = fail_amount // days_to_fail
+            st.write(f"今日から {fail_date_str} までの **残り{days_to_fail}日間**、1日あたりの変動費（食費や交際費）を現在のペースより **¥{daily_cut:,}** ずつ減らしてください。")
+            st.caption("※これに成功すれば、無駄な手数料のかかる分割払いを利用することなく自力で乗り切れます。")
+        else:
+            st.write("破綻日が本日または過去のため、日々の節約による解決は時間切れです。")
+
+        # --- 解決策B: 最小限の分割払いへの変更 ---
+        st.markdown("#### 💳 プランB: クレカ請求の分割払い変更（最適解）")
+        total_bill_this_month = int(float(m_data['mercari_bill'])) + int(float(m_data['paypay_bill']))
+        
+        if total_bill_this_month > 0:
+            best_n = None
+            best_monthly_payment = 0
+            
+            # 各クレジットカードの支払日（早い方に合わせる）
+            mercari_d = int(float(m_data.get('mercari_date', 27)))
+            paypay_d = int(float(m_data.get('paypay_date', 27)))
+            payment_date = min(mercari_d if mercari_d > 0 else 27, paypay_d if paypay_d > 0 else 27)
+            
+            # N回払いのシミュレーション (年利約15% -> 月利1.25%で概算)
+            for N in [2, 3, 5, 6, 10, 12, 24]:
+                monthly_fee = int(total_bill_this_month * 0.0125)
+                monthly_payment = (total_bill_this_month // N) + monthly_fee
+                
+                is_safe = True
+                months_passed = 0
+                current_m = today.month
+                
+                # 未来150日の残高配列に、分割払い変更の「差分（Δ）」を適用して再評価
+                for row in long_term_chart_data:
+                    d_obj = datetime.strptime(row["日付"], "%Y-%m-%d").date()
+                    original_balance = row["残高"]
+                    
+                    if d_obj.month != current_m:
+                        current_m = d_obj.month
+                        months_passed += 1
+                        
+                    # 支払日を何回跨いだか計算
+                    payment_count = months_passed + (1 if d_obj.day >= payment_date else 0)
+                    
+                    if payment_count > 0:
+                        # 分割にしたことで「今月払うはずだった全額」が浮き、代わりに「N回分の分割費用」が引かれる
+                        # ただし、分割回数(N)の上限を超えた支払いは発生しない
+                        actual_payments = min(payment_count, N)
+                        adjusted_balance = original_balance + total_bill_this_month - (monthly_payment * actual_payments)
+                    else:
+                        adjusted_balance = original_balance
+                        
+                    if adjusted_balance < 0:
+                        is_safe = False
+                        break  # この分割回数では未来で破綻するためループを抜けて次のNを試す
+                        
+                if is_safe:
+                    best_n = N
+                    best_monthly_payment = monthly_payment
+                    break  # 最小の安全な分割回数が見つかった時点で確定
+            
+            if best_n:
+                st.success(f"**【数学的最適解】クレカ請求のうち ¥{total_bill_this_month:,} を「{best_n}回払い」に変更してください。**")
+                st.write(f"この操作により、今月の支払いは **¥{best_monthly_payment:,}** に下がり、5ヶ月先までシミュレーションしても口座残高はショートしません。")
+                total_fee = int(total_bill_this_month * 0.0125 * best_n)
+                st.caption(f"※年利15%の手数料を考慮した計算です。トータルで約 ¥{total_fee:,} の手数料を余分に払うことになります。生活に余裕が出た月に一括繰り上げ返済することを推奨します。")
+            else:
+                st.error("❌ **【打つ手なし】最大24回の分割払いに変更しても、将来どこかで必ずマイナスになります。**")
+                st.write("計算上、借金をして支払いを先送りしても根本的な赤字は解消しません。**シフトを増やして収入を上げるか、不用品（使っていない撮影機材や参考書など）を売却して即金を作る**以外に数学的な解決策はありません。")
+        else:
+            st.write("今月のクレカ請求がないため、分割払いへの変更による救済は利用できません。")
+
 elif shortfall_warnings:
-    st.warning("⚠️ **一時的な資金ショート予測！**\n\n月末トータルでは足りますが、給料日などの前に引き落としが来て残高がマイナスになります。")
+    st.warning("⚠️ **一時的な資金ショート予測！**\n\n月末トータルでは足りますが、給料日などの前に引き落としが来て一時的に残高がマイナスになります。")
     for w in shortfall_warnings:
         st.warning(f"👉 **{today.month}/{w['day']}** の時点で口座残高が **¥{w['shortfall']:,}** 足りなくなります！事前に口座へ入金してください。")
+
 elif available_total < 5000:
     st.warning(f"⚠️ 支払いは間に合いますが、本当に使える残り資金が **¥{available_total:,}** とギリギリです。")
 else:
