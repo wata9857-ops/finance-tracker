@@ -591,8 +591,8 @@ for row in all_m_records_list:
 c3, c4 = st.columns(2)
 
 # 現在の未払い総額 ＋ 未来の分割払い請求額 ＝ 本当の利用残高
-real_mercari_debt = m_data['mercari_debt'] + future_mercari_bills
-real_paypay_debt = m_data['paypay_debt'] + future_paypay_bills
+real_mercari_debt = m_data['mercari_debt'] 
+real_paypay_debt = m_data['paypay_debt'] 
 
 mercari_avail = 100000 - real_mercari_debt
 paypay_avail = 30000 - real_paypay_debt
