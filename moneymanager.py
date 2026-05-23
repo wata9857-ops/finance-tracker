@@ -163,10 +163,13 @@ def add_daily_expense(target_date, amount, payment_method, category, memo):
         elif payment_method == "メルカリクレカ": m_data["mercari_debt"] = max(0, m_data["mercari_debt"] - amount)
         elif payment_method == "PayPayクレカ": m_data["paypay_debt"] = max(0, m_data["paypay_debt"] - amount)
     elif category == "クレカ先払い(繰り上げ返済)":
-        # ★追加：先払いの場合、口座残高が減り、クレカ負債も同時に減る
-        m_data["bank_balance"] -= amount
-        if payment_method == "メルカリクレカ": m_data["mercari_debt"] = max(0, m_data["mercari_debt"] - amount)
-        elif payment_method == "PayPayクレカ": m_data["paypay_debt"] = max(0, m_data["paypay_debt"] - amount)
+        # 支払方法で対象のクレカが選ばれている場合のみ処理（現金のままだとお金が消滅するため）
+        if payment_method in ["メルカリクレカ", "PayPayクレカ"]:
+            m_data["bank_balance"] -= amount
+            if payment_method == "メルカリクレカ": 
+                m_data["mercari_debt"] = max(0, m_data["mercari_debt"] - amount)
+            elif payment_method == "PayPayクレカ": 
+                m_data["paypay_debt"] = max(0, m_data["paypay_debt"] - amount)
     else:
         # 通常支出・特別支出の場合
         if payment_method == "現金/口座": m_data["bank_balance"] -= amount
@@ -188,7 +191,8 @@ def get_monthly_expenses(month):
     for row in daily_values[start_idx:]:
         padded = row + [""] * (5 - len(row))
         if str(padded[0]).startswith(month):
-            if padded[3] != "特別収入":
+            # 特別収入とクレカ先払い（資金移動）は純粋な消費ではないため除外
+            if padded[3] not in ["特別収入", "クレカ先払い(繰り上げ返済)"]:
                 method = padded[2]
                 if method in expenses:
                     try:
