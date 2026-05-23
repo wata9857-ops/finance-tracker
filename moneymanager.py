@@ -560,28 +560,12 @@ st.divider()
 st.markdown("### 🔮 クレカ利用状況 & 財政予想")
 st.caption("※メルペイやPayPayの「電子マネー残高（チャージ分）」は、現金と同じように『銀行口座』の残高に含めて管理するとわかりやすいです！")
 
-# ★追加：来月以降に登録されている分割払い等の請求額をスキャンして合計する
-sheet_m = get_worksheet("monthly_settings")
-all_values_m = sheet_m.get_all_values()
-
-correct_keys = [
-    "month", "bank_balance", "income_job", "income_allowance", "subs", 
-    "mercari_bill", "paypay_bill", "mercari_debt", "paypay_debt",
-    "job_date", "allowance_date", "subs_date", "mercari_date", "paypay_date",
-    "job_paid", "allowance_paid", "mercari_paid", "paypay_paid"
-]
-
-all_m_records = []
-if len(all_values_m) > 0:
-    start_idx = 1 if not str(all_values_m[0][0]).startswith("202") else 0
-    for row in all_values_m[start_idx:]:
-        padded_row = row + [0] * (len(correct_keys) - len(row))
-        all_m_records.append(dict(zip(correct_keys, padded_row)))
-
+# ★来月以降に登録されている分割払い等の請求額をスキャンして合計する
+# （※「4. キャッシュフロー」で取得済みの all_m_records_list を再利用しAPI通信を削減）
 future_mercari_bills = 0
 future_paypay_bills = 0
 
-for row in all_m_records:
+for row in all_m_records_list:
     row_month = str(row.get("month", "")).strip()
     if not row_month:
         continue # 空のデータはスキップ
