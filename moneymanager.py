@@ -11,9 +11,13 @@ import calendar
 st.set_page_config(page_title="Personal Finance", page_icon="💸", layout="centered")
 
 # === 【ここから追加】独自のパスワード認証システム ===
+# === 【ここから追加】独自のパスワード認証システム ===
 def check_password():
     def password_entered():
-        if st.session_state["password"] == st.secrets["app_password"]:
+        # ★ここを修正：st.secrets["..."] ではなく st.secrets.get(...) を使う
+        correct_password = st.secrets.get("app_password", "1234")
+        
+        if st.session_state["password"] == correct_password:
             st.session_state["password_correct"] = True
             del st.session_state["password"]  # セキュリティのため入力値を削除
         else:
@@ -31,7 +35,7 @@ def check_password():
 # パスワードが正しく入力されるまで、ここから下の処理を完全に停止する
 if not check_password():
     st.stop()
-    
+
 JST = timezone(timedelta(hours=+9), 'JST')
 now_jst = datetime.now(JST)
 today = now_jst.date()
