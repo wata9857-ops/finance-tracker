@@ -15,7 +15,7 @@ st.set_page_config(page_title="Personal Finance", page_icon="💸", layout="cent
 def check_password():
     def password_entered():
         # ★ここを修正：st.secrets["..."] ではなく st.secrets.get(...) を使う
-        correct_password = st.secrets.get("app_password", "1234")
+        correct_password = st.secrets.get("app_password", "5555")
         
         if st.session_state["password"] == correct_password:
             st.session_state["password_correct"] = True
